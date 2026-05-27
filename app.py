@@ -88,19 +88,27 @@ with tab1:
     st.dataframe(filtered, use_container_width=True)
 
 with tab2:
-    st.subheader("Історія громади")
+    st.subheader("Історія громади / району / області")
 
-    search_hromada = st.text_input("Введи назву громади або код", key="history_search")
+    search_hromada = st.text_input(
+        "Введи назву громади, району, області або код",
+        key="history_search"
+    )
 
     history = df.copy()
 
     if search_hromada:
-        history = history[
+        mask = (
             history["territory_name"].str.contains(search_hromada, case=False, na=False)
             | history["hromada_code_7"].str.contains(search_hromada, case=False, na=False)
-        ]
+            | history["rayon"].str.contains(search_hromada, case=False, na=False)
+            | history["oblast"].str.contains(search_hromada, case=False, na=False)
+        )
 
+        history = history[mask]
+
+        st.metric("Кількість записів", len(history))
         st.dataframe(history, use_container_width=True)
 
     else:
-        st.info("Введи назву громади або код, щоб побачити її історію.")
+        st.info("Введи назву громади, району, області або код, щоб побачити історію.")
