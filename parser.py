@@ -13,7 +13,6 @@ PRINT_URL = "https://zakon.rada.gov.ua/laws/show/z0380-25/print"
 
 engine = create_engine(DATABASE_URL)
 
-
 CATEGORY_BY_TABLE = {
     1: "Території можливих бойових дій",
     2: "Території бойових дій",
@@ -60,6 +59,23 @@ def is_territory_code(value):
     return value.startswith("UA") and len(value) >= 9
 
 
+def is_oblast_row(value):
+    value = str(value).strip()
+    return "ОБЛАСТЬ" in value.upper() or "АВТОНОМНА РЕСПУБЛІКА КРИМ" in value.upper()
+
+
+def is_rayon_row(value):
+    value = str(value).strip()
+    return "район" in value.lower()
+
+
+def clean_repeated_header(value):
+    parts = [p.strip() for p in str(value).split("  ") if p.strip()]
+    if parts:
+        return parts[0]
+    return str(value).strip()
+
+
 def extract_rows(docx_content):
     document = Document(BytesIO(docx_content))
     rows = []
@@ -67,16 +83,31 @@ def extract_rows(docx_content):
     for table_index, table in enumerate(document.tables, start=1):
         category = CATEGORY_BY_TABLE.get(table_index, f"Таблиця {table_index}")
 
+        current_oblast = None
+        current_rayon = None
+
         for row in table.rows:
             cells = [cell.text.replace("\n", " ").strip() for cell in row.cells]
 
             if len(cells) < 4:
                 continue
 
-            full_code = cells[0]
-            territory_name = cells[1]
-            status_from = cells[2]
-            status_to = cells[3]
+            first_cell = clean_repeated_header(cells[0])
+            second_cell = clean_repeated_header(cells[1])
+
+            if is_oblast_row(first_cell):
+                current_oblast = first_cell.title()
+                current_rayon = None
+                continue
+
+            if is_rayon_row(first_cell) and not is_territory_code(first_cell):
+                current_rayon = first_cell
+                continue
+
+            full_code = cells[0].strip()
+            territory_name = cells[1].strip()
+            status_from = cells[2].strip()
+            status_to = cells[3].strip()
 
             if not is_territory_code(full_code):
                 continue
@@ -85,8 +116,8 @@ def extract_rows(docx_content):
                 "full_code": full_code,
                 "hromada_code_7": full_code.replace("UA", "")[:7],
                 "territory_name": territory_name,
-                "oblast": None,
-                "rayon": None,
+                "oblast": current_oblast,
+                "rayon": current_rayon,
                 "category": category,
                 "status_from": normalize_date(status_from),
                 "status_to": normalize_date(status_to),
@@ -152,7 +183,7 @@ if __name__ == "__main__":
 
     df = extract_rows(docx_content)
     print("Rows extracted:", len(df))
-    print(df.head(10))
+    print(df.head(20))
 
     replace_current_data(df, document_id)
     print("Database updated successfully")
