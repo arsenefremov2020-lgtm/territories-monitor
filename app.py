@@ -5,7 +5,7 @@ from sqlalchemy import create_engine, text
 st.set_page_config(page_title="Territories Monitor", layout="wide")
 
 st.title("Territories Monitor")
-st.write("Система моніторингу територій бойових дій та тимчасово окупованих територій")
+st.caption("Моніторинг територій бойових дій та тимчасово окупованих територій")
 
 DATABASE_URL = st.secrets["DATABASE_URL"]
 engine = create_engine(DATABASE_URL)
@@ -24,12 +24,72 @@ from territory_status_history
 order by territory_name;
 """
 
-try:
-    df = pd.read_sql(text(query), engine)
+df = pd.read_sql(text(query), engine)
 
-    st.subheader("Дані з бази")
-    st.dataframe(df, use_container_width=True)
+tab1, tab2 = st.tabs(["Станом на дату", "Історія громади"])
 
-except Exception as e:
-    st.error("Не вдалося підключитися до бази або прочитати дані.")
-    st.write(e)
+with tab1:
+    st.subheader("Станом на дату")
+
+    selected_date = st.date_input("Дата", value=pd.Timestamp.today())
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        oblasts = ["Усі"] + sorted(df["oblast"].dropna().unique().tolist())
+        selected_oblast = st.selectbox("Область", oblasts)
+
+    with col2:
+        categories = ["Усі"] + sorted(df["category"].dropna().unique().tolist())
+        selected_category = st.selectbox("Категорія", categories)
+
+    with col3:
+        search_text = st.text_input("Пошук громади")
+
+    filtered = df.copy()
+
+    filtered["status_from"] = pd.to_datetime(filtered["status_from"])
+    filtered["status_to"] = pd.to_datetime(filtered["status_to"])
+
+    selected_date = pd.to_datetime(selected_date)
+
+    filtered = filtered[
+        (filtered["status_from"] <= selected_date)
+        & (
+            filtered["status_to"].isna()
+            | (filtered["status_to"] >= selected_date)
+        )
+    ]
+
+    if selected_oblast != "Усі":
+        filtered = filtered[filtered["oblast"] == selected_oblast]
+
+    if selected_category != "Усі":
+        filtered = filtered[filtered["category"] == selected_category]
+
+    if search_text:
+        filtered = filtered[
+            filtered["territory_name"].str.contains(search_text, case=False, na=False)
+        ]
+
+    st.metric("Кількість записів", len(filtered))
+
+    st.dataframe(filtered, use_container_width=True)
+
+with tab2:
+    st.subheader("Історія громади")
+
+    search_hromada = st.text_input("Введи назву громади або код", key="history_search")
+
+    history = df.copy()
+
+    if search_hromada:
+        history = history[
+            history["territory_name"].str.contains(search_hromada, case=False, na=False)
+            | history["hromada_code_7"].str.contains(search_hromada, case=False, na=False)
+        ]
+
+        st.dataframe(history, use_container_width=True)
+
+    else:
+        st.info("Введи назву громади або код, щоб побачити її історію.")
