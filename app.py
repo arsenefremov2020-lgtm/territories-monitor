@@ -33,17 +33,25 @@ with tab1:
 
     selected_date = st.date_input("Дата", value=pd.Timestamp.today())
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
 
     with col1:
         oblasts = ["Усі"] + sorted(df["oblast"].dropna().unique().tolist())
         selected_oblast = st.selectbox("Область", oblasts)
 
+    temp_for_rayon = df.copy()
+    if selected_oblast != "Усі":
+        temp_for_rayon = temp_for_rayon[temp_for_rayon["oblast"] == selected_oblast]
+
     with col2:
+        rayons = ["Усі"] + sorted(temp_for_rayon["rayon"].dropna().unique().tolist())
+        selected_rayon = st.selectbox("Район", rayons)
+
+    with col3:
         categories = ["Усі"] + sorted(df["category"].dropna().unique().tolist())
         selected_category = st.selectbox("Категорія", categories)
 
-    with col3:
+    with col4:
         search_text = st.text_input("Пошук громади")
 
     filtered = df.copy()
@@ -63,6 +71,9 @@ with tab1:
 
     if selected_oblast != "Усі":
         filtered = filtered[filtered["oblast"] == selected_oblast]
+
+    if selected_rayon != "Усі":
+        filtered = filtered[filtered["rayon"] == selected_rayon]
 
     if selected_category != "Усі":
         filtered = filtered[filtered["category"] == selected_category]
