@@ -103,7 +103,7 @@ def extract_rows(docx_content):
             if len(cells) < 4:
                 continue
             if len(cells) != 4:
-    print("Warning: unexpected column count:", len(cells), cells)
+                print("Warning: unexpected column count:", len(cells), cells)
 
             first_cell = clean_repeated_header(cells[0])
             second_cell = clean_repeated_header(cells[1])
