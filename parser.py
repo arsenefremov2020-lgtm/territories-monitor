@@ -5,6 +5,8 @@ import pandas as pd
 from sqlalchemy import create_engine, text
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
+from docx import Document
+from io import BytesIO
 
 DATABASE_URL = os.environ["DATABASE_URL"]
 PRINT_URL = "https://zakon.rada.gov.ua/laws/show/z0380-25/print"
@@ -24,42 +26,33 @@ def get_docx_url():
     raise Exception("DOCX link not found")
 
 
-def save_document_record(docx_url):
+def download_docx(docx_url):
     response = requests.get(docx_url, timeout=60)
     response.raise_for_status()
 
     file_hash = hashlib.sha256(response.content).hexdigest()
 
-    with engine.begin() as conn:
-        existing = conn.execute(
-            text("select id from documents where file_hash = :file_hash"),
-            {"file_hash": file_hash},
-        ).fetchone()
+    return response.content, file_hash
 
-        if existing:
-            print("Document already exists, no new record created")
-            return
 
-        conn.execute(
-            text("""
-                insert into documents
-                (source_name, source_url, document_number, document_date, file_hash)
-                values
-                (:source_name, :source_url, :document_number, :document_date, :file_hash)
-            """),
-            {
-                "source_name": "Верховна Рада України / zakon.rada.gov.ua",
-                "source_url": docx_url,
-                "document_number": "376",
-                "document_date": "2025-02-28",
-                "file_hash": file_hash,
-            },
-        )
+def extract_docx_tables(docx_content):
+    document = Document(BytesIO(docx_content))
 
-    print("New document saved")
+    print("Tables found:", len(document.tables))
+
+    for i, table in enumerate(document.tables):
+        print("TABLE", i + 1, "ROWS:", len(table.rows), "COLS:", len(table.columns))
+
+        for row in table.rows[:5]:
+            values = [cell.text.replace("\n", " ").strip() for cell in row.cells]
+            print(values)
 
 
 if __name__ == "__main__":
     docx_url = get_docx_url()
     print("DOCX URL:", docx_url)
-    save_document_record(docx_url)
+
+    docx_content, file_hash = download_docx(docx_url)
+    print("File hash:", file_hash)
+
+    extract_docx_tables(docx_content)
