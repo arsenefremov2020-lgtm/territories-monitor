@@ -87,6 +87,8 @@ def clean_repeated_header(value):
 
 def extract_rows(docx_content):
     document = Document(BytesIO(docx_content))
+    if len(document.tables) < 5:
+    raise Exception(f"Unexpected DOCX structure: expected at least 5 tables, found {len(document.tables)}")
     rows = []
 
     for table_index, table in enumerate(document.tables, start=1):
@@ -100,6 +102,8 @@ def extract_rows(docx_content):
 
             if len(cells) < 4:
                 continue
+            if len(cells) != 4:
+    print("Warning: unexpected column count:", len(cells), cells)
 
             first_cell = clean_repeated_header(cells[0])
             second_cell = clean_repeated_header(cells[1])
