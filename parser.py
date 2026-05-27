@@ -70,10 +70,19 @@ def is_rayon_row(value):
 
 
 def clean_repeated_header(value):
-    parts = [p.strip() for p in str(value).split("  ") if p.strip()]
+    import re
+
+    value = str(value).replace("\n", " ").strip()
+    value = re.sub(r"\s+", " ", value)
+
+    parts = [p.strip() for p in value.split("  ") if p.strip()]
     if parts:
-        return parts[0]
-    return str(value).strip()
+        value = parts[0]
+
+    value = re.sub(r"^\d+(\.\d+)*\.\s*", "", value)
+    value = re.sub(r"^\d+(\.\d+)*\s*", "", value)
+
+    return value.strip()
 
 
 def extract_rows(docx_content):
