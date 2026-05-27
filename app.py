@@ -109,7 +109,6 @@ with tab1:
     st.metric("Кількість записів", len(filtered))
 
     st.dataframe(filtered, use_container_width=True)
-    excel_file = filtered.to_excel(index=False, engine="openpyxl")
 
 st.download_button(
     label="Завантажити Excel",
