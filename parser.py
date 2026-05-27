@@ -88,7 +88,7 @@ def clean_repeated_header(value):
 def extract_rows(docx_content):
     document = Document(BytesIO(docx_content))
     if len(document.tables) < 5:
-    raise Exception(f"Unexpected DOCX structure: expected at least 5 tables, found {len(document.tables)}")
+        raise Exception(f"Unexpected DOCX structure: expected at least 5 tables, found {len(document.tables)}")
     rows = []
 
     for table_index, table in enumerate(document.tables, start=1):
