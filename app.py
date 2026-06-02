@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import pydeck as pdk
 from sqlalchemy import create_engine, text
 
 st.set_page_config(
@@ -53,6 +54,15 @@ CUSTOM_CSS = """
         color: #1e3a8a;
         margin-bottom: 1rem;
         font-size: 0.94rem;
+    }
+
+    .insight-card {
+        padding: 1rem 1.1rem;
+        border-radius: 18px;
+        border: 1px solid rgba(148, 163, 184, 0.3);
+        background: rgba(248, 250, 252, 0.92);
+        margin-top: 0.7rem;
+        margin-bottom: 0.7rem;
     }
 
     .small-note {
@@ -120,6 +130,14 @@ OBLAST_COORDS = {
     "чернігівська": {"lat": 51.4982, "lon": 31.2893, "label": "Чернігівська область"},
 }
 
+CATEGORY_COLORS = {
+    "Території можливих бойових дій": [59, 130, 246, 165],
+    "Території бойових дій": [245, 158, 11, 175],
+    "Території активних бойових дій": [220, 38, 38, 185],
+    "Тимчасово окуповані території": [88, 28, 135, 180],
+}
+DEFAULT_COLOR = [15, 118, 110, 165]
+
 
 @st.cache_resource
 def get_engine():
@@ -178,33 +196,59 @@ def normalize_oblast_name(value):
     return normalized
 
 
+def dominant_category(categories):
+    if categories.empty:
+        return "Немає даних"
+    return categories.value_counts().idxmax()
+
+
 def build_oblast_map_data(data):
     if data.empty:
-        return pd.DataFrame(columns=["oblast", "lat", "lon", "records", "map_size"])
+        return pd.DataFrame(
+            columns=[
+                "oblast",
+                "lat",
+                "lon",
+                "records",
+                "communities",
+                "dominant_category",
+                "radius",
+                "color",
+            ]
+        )
 
-    stats = (
-        data.assign(oblast_key=data["oblast"].apply(normalize_oblast_name))
-        .groupby("oblast_key", dropna=True)
-        .size()
-        .reset_index(name="records")
+    prepared = data.assign(oblast_key=data["oblast"].apply(normalize_oblast_name))
+
+    grouped = (
+        prepared.groupby("oblast_key", dropna=True)
+        .agg(
+            records=("territory_name", "size"),
+            communities=("hromada_code_7", "nunique"),
+            dominant_category=("category", dominant_category),
+        )
+        .reset_index()
     )
 
     rows = []
-    max_records = max(stats["records"].max(), 1)
+    max_records = max(grouped["records"].max(), 1)
 
-    for _, row in stats.iterrows():
+    for _, row in grouped.iterrows():
         coords = OBLAST_COORDS.get(row["oblast_key"])
         if not coords:
             continue
 
         records = int(row["records"])
+        dominant = row["dominant_category"]
         rows.append(
             {
                 "oblast": coords["label"],
                 "lat": coords["lat"],
                 "lon": coords["lon"],
                 "records": records,
-                "map_size": 18000 + int((records / max_records) * 62000),
+                "communities": int(row["communities"]),
+                "dominant_category": dominant,
+                "radius": 16000 + int((records / max_records) * 52000),
+                "color": CATEGORY_COLORS.get(dominant, DEFAULT_COLOR),
             }
         )
 
@@ -229,6 +273,50 @@ def prepare_display_table(data):
         }
     )
     return table
+
+
+def render_pydeck_map(map_data):
+    if map_data.empty:
+        return
+
+    center_lat = float(map_data["lat"].mean())
+    center_lon = float(map_data["lon"].mean())
+    zoom = 5 if len(map_data) > 1 else 6
+
+    layer = pdk.Layer(
+        "ScatterplotLayer",
+        data=map_data,
+        get_position="[lon, lat]",
+        get_radius="radius",
+        get_fill_color="color",
+        pickable=True,
+        auto_highlight=True,
+    )
+
+    view_state = pdk.ViewState(
+        latitude=center_lat,
+        longitude=center_lon,
+        zoom=zoom,
+        pitch=0,
+    )
+
+    tooltip = {
+        "html": "<b>{oblast}</b><br/>Записів: {records}<br/>Громад: {communities}<br/>Переважна категорія: {dominant_category}",
+        "style": {
+            "backgroundColor": "#0f172a",
+            "color": "white",
+            "fontSize": "13px",
+        },
+    }
+
+    deck = pdk.Deck(
+        layers=[layer],
+        initial_view_state=view_state,
+        tooltip=tooltip,
+        map_style=None,
+    )
+
+    st.pydeck_chart(deck, use_container_width=True)
 
 
 latest_doc = load_latest_document()
@@ -398,12 +486,12 @@ with tab3:
         )
 
 with tab4:
-    st.subheader("Карта за областями")
+    st.subheader("Карта та просторовий зріз")
     st.markdown(
         """
         <div class="map-note">
-            Це оглядова карта за областями. Точка показує центр області, а її розмір залежить від кількості записів у поточній вибірці.
-            Для повноцінної карти громад пізніше потрібно підключити geojson меж громад або районів.
+            Карта показує оглядову концентрацію записів за областями. Розмір точки залежить від кількості записів,
+            а колір — від переважної категорії у відповідній області для поточної вибірки.
         </div>
         """,
         unsafe_allow_html=True,
@@ -412,26 +500,68 @@ with tab4:
     if map_data.empty:
         st.info("Для обраних фільтрів немає даних, які можна показати на карті.")
     else:
-        map_left, map_right = st.columns([2, 1])
+        map_metric_1, map_metric_2, map_metric_3, map_metric_4 = st.columns(4)
+        map_metric_1.metric("Областей на карті", len(map_data))
+        map_metric_2.metric("Записів у вибірці", f"{int(map_data['records'].sum()):,}".replace(",", " "))
+        map_metric_3.metric("Громад у вибірці", f"{int(map_data['communities'].sum()):,}".replace(",", " "))
+        map_metric_4.metric("Найбільша область", map_data.iloc[0]["oblast"])
+
+        map_left, map_right = st.columns([2.2, 1])
 
         with map_left:
-            st.map(
-                map_data,
-                latitude="lat",
-                longitude="lon",
-                size="map_size",
-                zoom=5,
-                use_container_width=True,
-            )
+            render_pydeck_map(map_data)
 
         with map_right:
-            st.write("Кількість записів за областями")
+            st.write("Легенда категорій")
+            legend_items = pd.DataFrame(
+                [
+                    {"Категорія": "Можливі бойові дії", "Позначення": "синя точка"},
+                    {"Категорія": "Бойові дії", "Позначення": "помаранчева точка"},
+                    {"Категорія": "Активні бойові дії", "Позначення": "червона точка"},
+                    {"Категорія": "Тимчасово окуповані", "Позначення": "фіолетова точка"},
+                ]
+            )
+            st.dataframe(legend_items, use_container_width=True, hide_index=True)
+
+            st.write("Топ областей")
             st.dataframe(
-                map_data[["oblast", "records"]].rename(
-                    columns={"oblast": "Область", "records": "Кількість записів"}
-                ),
+                map_data[["oblast", "records", "communities", "dominant_category"]]
+                .rename(
+                    columns={
+                        "oblast": "Область",
+                        "records": "Записів",
+                        "communities": "Громад",
+                        "dominant_category": "Переважна категорія",
+                    }
+                )
+                .head(10),
                 use_container_width=True,
                 hide_index=True,
+            )
+
+        top_oblast = map_data.iloc[0]["oblast"]
+        top_records = int(map_data.iloc[0]["records"])
+        total_records = int(map_data["records"].sum())
+        top_share = round(top_records / total_records * 100, 1) if total_records else 0
+        top_dominant_category = map_data.iloc[0]["dominant_category"]
+
+        st.markdown(
+            f"""
+            <div class="insight-card">
+                <b>Короткий висновок по карті.</b><br>
+                Найбільша концентрація записів у поточній вибірці припадає на <b>{top_oblast}</b> — {top_records} записів,
+                або близько {top_share}% від усіх записів, відображених на карті. Переважна категорія для цієї області:
+                <b>{top_dominant_category}</b>.
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        with st.expander("Обмеження цієї карти"):
+            st.write(
+                "Це не карта меж громад. Вона показує агреговану картину по областях, тому її варто використовувати "
+                "для швидкого огляду концентрації записів. Для точного просторового аналізу потрібно додати geojson "
+                "меж громад або районів і зв'язати його з кодами територій."
             )
 
 st.markdown(
