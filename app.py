@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import pydeck as pdk
+import requests
 from sqlalchemy import create_engine, text
 
 st.set_page_config(
@@ -137,6 +138,8 @@ CATEGORY_COLORS = {
     "Тимчасово окуповані території": [88, 28, 135, 180],
 }
 DEFAULT_COLOR = [15, 118, 110, 165]
+SELECTED_HROMADA_COLOR = [255, 255, 255, 235]
+SELECTED_HROMADA_BORDER = [15, 23, 42, 255]
 
 
 @st.cache_resource
@@ -194,6 +197,22 @@ def normalize_oblast_name(value):
     normalized = normalized.replace("м.", "")
     normalized = " ".join(normalized.split())
     return normalized
+
+
+def simplify_hromada_name(value):
+    cleaned = str(value).strip()
+    replacements = [
+        "територіальна громада",
+        "міська громада",
+        "селищна громада",
+        "сільська громада",
+        "громада",
+    ]
+    lowered = cleaned.lower()
+    for item in replacements:
+        lowered = lowered.replace(item, "")
+    lowered = " ".join(lowered.split())
+    return lowered if lowered else cleaned
 
 
 def dominant_category(categories):
@@ -255,6 +274,56 @@ def build_oblast_map_data(data):
     return pd.DataFrame(rows).sort_values("records", ascending=False)
 
 
+@st.cache_data(ttl=86400, show_spinner=False)
+def geocode_hromada(territory_name, oblast):
+    query_parts = [simplify_hromada_name(territory_name), str(oblast), "Україна"]
+    query = ", ".join([part for part in query_parts if part and part != "nan"])
+
+    try:
+        response = requests.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={"q": query, "format": "json", "limit": 1, "addressdetails": 0},
+            headers={"User-Agent": "territories-monitor/1.0"},
+            timeout=8,
+        )
+        response.raise_for_status()
+        results = response.json()
+    except Exception:
+        return None
+
+    if not results:
+        return None
+
+    return {"lat": float(results[0]["lat"]), "lon": float(results[0]["lon"])}
+
+
+def build_selected_hromada_points(selected_names, source_data):
+    rows = []
+    if not selected_names:
+        return pd.DataFrame(columns=["territory_name", "oblast", "rayon", "category", "lat", "lon", "radius"])
+
+    selected_source = source_data[source_data["territory_name"].isin(selected_names)].copy()
+    selected_source = selected_source.drop_duplicates(subset=["territory_name", "oblast", "rayon"])
+
+    for _, row in selected_source.iterrows():
+        point = geocode_hromada(row["territory_name"], row["oblast"])
+        if not point:
+            continue
+        rows.append(
+            {
+                "territory_name": row["territory_name"],
+                "oblast": row["oblast"],
+                "rayon": row["rayon"],
+                "category": row["category"],
+                "lat": point["lat"],
+                "lon": point["lon"],
+                "radius": 8500,
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
 def prepare_display_table(data):
     table = data.copy()
     table["status_from"] = table["status_from"].dt.strftime("%d.%m.%Y")
@@ -275,23 +344,46 @@ def prepare_display_table(data):
     return table
 
 
-def render_pydeck_map(map_data):
-    if map_data.empty:
+def render_pydeck_map(map_data, hromada_points=None):
+    if map_data.empty and (hromada_points is None or hromada_points.empty):
         return
 
-    center_lat = float(map_data["lat"].mean())
-    center_lon = float(map_data["lon"].mean())
-    zoom = 5 if len(map_data) > 1 else 6
+    center_source = hromada_points if hromada_points is not None and not hromada_points.empty else map_data
+    center_lat = float(center_source["lat"].mean())
+    center_lon = float(center_source["lon"].mean())
+    zoom = 7 if hromada_points is not None and not hromada_points.empty else (5 if len(map_data) > 1 else 6)
 
-    layer = pdk.Layer(
-        "ScatterplotLayer",
-        data=map_data,
-        get_position="[lon, lat]",
-        get_radius="radius",
-        get_fill_color="color",
-        pickable=True,
-        auto_highlight=True,
-    )
+    layers = []
+
+    if not map_data.empty:
+        layers.append(
+            pdk.Layer(
+                "ScatterplotLayer",
+                data=map_data,
+                get_position="[lon, lat]",
+                get_radius="radius",
+                get_fill_color="color",
+                pickable=True,
+                auto_highlight=True,
+            )
+        )
+
+    if hromada_points is not None and not hromada_points.empty:
+        layers.append(
+            pdk.Layer(
+                "ScatterplotLayer",
+                data=hromada_points,
+                get_position="[lon, lat]",
+                get_radius="radius",
+                get_fill_color=SELECTED_HROMADA_COLOR,
+                get_line_color=SELECTED_HROMADA_BORDER,
+                line_width_min_pixels=2,
+                stroked=True,
+                filled=True,
+                pickable=True,
+                auto_highlight=True,
+            )
+        )
 
     view_state = pdk.ViewState(
         latitude=center_lat,
@@ -301,7 +393,7 @@ def render_pydeck_map(map_data):
     )
 
     tooltip = {
-        "html": "<b>{oblast}</b><br/>Записів: {records}<br/>Громад: {communities}<br/>Переважна категорія: {dominant_category}",
+        "html": "<b>{oblast}</b><br/>Записів: {records}<br/>Громад: {communities}<br/>Переважна категорія: {dominant_category}<br/><br/><b>{territory_name}</b><br/>{rayon}<br/>{category}",
         "style": {
             "backgroundColor": "#0f172a",
             "color": "white",
@@ -310,7 +402,7 @@ def render_pydeck_map(map_data):
     }
 
     deck = pdk.Deck(
-        layers=[layer],
+        layers=layers,
         initial_view_state=view_state,
         tooltip=tooltip,
         map_style=None,
@@ -491,77 +583,119 @@ with tab4:
         """
         <div class="map-note">
             Карта показує оглядову концентрацію записів за областями. Розмір точки залежить від кількості записів,
-            а колір — від переважної категорії у відповідній області для поточної вибірки.
+            а колір — від переважної категорії у відповідній області для поточної вибірки. Окремі громади можна підсвітити нижче.
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    if map_data.empty:
+    if filtered.empty:
         st.info("Для обраних фільтрів немає даних, які можна показати на карті.")
     else:
+        available_hromadas = sorted(filtered["territory_name"].dropna().unique().tolist())
+        selected_hromadas = st.multiselect(
+            "Підсвітити конкретні громади на карті",
+            available_hromadas,
+            default=available_hromadas[:1] if search_text and len(available_hromadas) == 1 else [],
+            max_selections=5,
+            help="Можна обрати до 5 громад. Система спробує знайти їх координати й показати окремими світлими точками.",
+        )
+
+        hromada_points = build_selected_hromada_points(selected_hromadas, filtered)
+
+        if selected_hromadas and hromada_points.empty:
+            st.warning(
+                "Не вдалося автоматично знайти координати обраних громад. Для стабільного точного підсвічування треба додати власну таблицю координат або geojson меж громад."
+            )
+
+        missing_hromadas = sorted(set(selected_hromadas) - set(hromada_points["territory_name"].tolist())) if selected_hromadas else []
+        if missing_hromadas:
+            st.caption("Не знайдено координати для: " + ", ".join(missing_hromadas))
+
         map_metric_1, map_metric_2, map_metric_3, map_metric_4 = st.columns(4)
         map_metric_1.metric("Областей на карті", len(map_data))
-        map_metric_2.metric("Записів у вибірці", f"{int(map_data['records'].sum()):,}".replace(",", " "))
-        map_metric_3.metric("Громад у вибірці", f"{int(map_data['communities'].sum()):,}".replace(",", " "))
-        map_metric_4.metric("Найбільша область", map_data.iloc[0]["oblast"])
+        map_metric_2.metric("Записів у вибірці", f"{int(map_data['records'].sum()):,}".replace(",", " ") if not map_data.empty else 0)
+        map_metric_3.metric("Громад у вибірці", f"{filtered['hromada_code_7'].nunique():,}".replace(",", " "))
+        map_metric_4.metric("Підсвічено громад", len(hromada_points))
 
         map_left, map_right = st.columns([2.2, 1])
 
         with map_left:
-            render_pydeck_map(map_data)
+            render_pydeck_map(map_data, hromada_points)
 
         with map_right:
-            st.write("Легенда категорій")
+            st.write("Легенда")
             legend_items = pd.DataFrame(
                 [
-                    {"Категорія": "Можливі бойові дії", "Позначення": "синя точка"},
-                    {"Категорія": "Бойові дії", "Позначення": "помаранчева точка"},
-                    {"Категорія": "Активні бойові дії", "Позначення": "червона точка"},
-                    {"Категорія": "Тимчасово окуповані", "Позначення": "фіолетова точка"},
+                    {"Позначення": "синя точка", "Значення": "можливі бойові дії"},
+                    {"Позначення": "помаранчева точка", "Значення": "бойові дії"},
+                    {"Позначення": "червона точка", "Значення": "активні бойові дії"},
+                    {"Позначення": "фіолетова точка", "Значення": "тимчасово окуповані"},
+                    {"Позначення": "світла точка", "Значення": "обрана громада"},
                 ]
             )
             st.dataframe(legend_items, use_container_width=True, hide_index=True)
 
             st.write("Топ областей")
-            st.dataframe(
-                map_data[["oblast", "records", "communities", "dominant_category"]]
-                .rename(
-                    columns={
-                        "oblast": "Область",
-                        "records": "Записів",
-                        "communities": "Громад",
-                        "dominant_category": "Переважна категорія",
-                    }
+            if map_data.empty:
+                st.info("Немає агрегованих даних за областями.")
+            else:
+                st.dataframe(
+                    map_data[["oblast", "records", "communities", "dominant_category"]]
+                    .rename(
+                        columns={
+                            "oblast": "Область",
+                            "records": "Записів",
+                            "communities": "Громад",
+                            "dominant_category": "Переважна категорія",
+                        }
+                    )
+                    .head(10),
+                    use_container_width=True,
+                    hide_index=True,
                 )
-                .head(10),
+
+        if not hromada_points.empty:
+            st.write("Підсвічені громади")
+            st.dataframe(
+                hromada_points[["territory_name", "oblast", "rayon", "category", "lat", "lon"]].rename(
+                    columns={
+                        "territory_name": "Громада",
+                        "oblast": "Область",
+                        "rayon": "Район",
+                        "category": "Категорія",
+                        "lat": "Широта",
+                        "lon": "Довгота",
+                    }
+                ),
                 use_container_width=True,
                 hide_index=True,
             )
 
-        top_oblast = map_data.iloc[0]["oblast"]
-        top_records = int(map_data.iloc[0]["records"])
-        total_records = int(map_data["records"].sum())
-        top_share = round(top_records / total_records * 100, 1) if total_records else 0
-        top_dominant_category = map_data.iloc[0]["dominant_category"]
+        if not map_data.empty:
+            top_oblast = map_data.iloc[0]["oblast"]
+            top_records = int(map_data.iloc[0]["records"])
+            total_records = int(map_data["records"].sum())
+            top_share = round(top_records / total_records * 100, 1) if total_records else 0
+            top_dominant_category = map_data.iloc[0]["dominant_category"]
 
-        st.markdown(
-            f"""
-            <div class="insight-card">
-                <b>Короткий висновок по карті.</b><br>
-                Найбільша концентрація записів у поточній вибірці припадає на <b>{top_oblast}</b> — {top_records} записів,
-                або близько {top_share}% від усіх записів, відображених на карті. Переважна категорія для цієї області:
-                <b>{top_dominant_category}</b>.
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+            st.markdown(
+                f"""
+                <div class="insight-card">
+                    <b>Короткий висновок по карті.</b><br>
+                    Найбільша концентрація записів у поточній вибірці припадає на <b>{top_oblast}</b> — {top_records} записів,
+                    або близько {top_share}% від усіх записів, відображених на карті. Переважна категорія для цієї області:
+                    <b>{top_dominant_category}</b>.
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
         with st.expander("Обмеження цієї карти"):
             st.write(
-                "Це не карта меж громад. Вона показує агреговану картину по областях, тому її варто використовувати "
-                "для швидкого огляду концентрації записів. Для точного просторового аналізу потрібно додати geojson "
-                "меж громад або районів і зв'язати його з кодами територій."
+                "Світлі точки громад визначаються через автоматичний пошук координат за назвою. Це зручний демо-рівень, "
+                "але не юридично точна геометрія меж. Для стабільного точного підсвічування треба додати geojson меж громад "
+                "або окрему таблицю з координатами центрів громад, пов'язану з кодами територій."
             )
 
 st.markdown(
