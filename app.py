@@ -45,6 +45,16 @@ CUSTOM_CSS = """
         margin-bottom: 1rem;
     }
 
+    .map-note {
+        padding: 0.85rem 1rem;
+        border-radius: 16px;
+        border: 1px solid rgba(59, 130, 246, 0.22);
+        background: rgba(239, 246, 255, 0.86);
+        color: #1e3a8a;
+        margin-bottom: 1rem;
+        font-size: 0.94rem;
+    }
+
     .small-note {
         color: #64748b;
         font-size: 0.9rem;
@@ -81,6 +91,34 @@ st.markdown(
 )
 
 DATABASE_URL = st.secrets["DATABASE_URL"]
+
+OBLAST_COORDS = {
+    "автономна республіка крим": {"lat": 45.3529, "lon": 34.5054, "label": "Автономна Республіка Крим"},
+    "вінницька": {"lat": 49.2331, "lon": 28.4682, "label": "Вінницька область"},
+    "волинська": {"lat": 50.7472, "lon": 25.3254, "label": "Волинська область"},
+    "дніпропетровська": {"lat": 48.4647, "lon": 35.0462, "label": "Дніпропетровська область"},
+    "донецька": {"lat": 48.0159, "lon": 37.8029, "label": "Донецька область"},
+    "житомирська": {"lat": 50.2547, "lon": 28.6587, "label": "Житомирська область"},
+    "закарпатська": {"lat": 48.6208, "lon": 22.2879, "label": "Закарпатська область"},
+    "запорізька": {"lat": 47.8388, "lon": 35.1396, "label": "Запорізька область"},
+    "івано-франківська": {"lat": 48.9226, "lon": 24.7111, "label": "Івано-Франківська область"},
+    "київська": {"lat": 50.4501, "lon": 30.5234, "label": "Київська область"},
+    "кіровоградська": {"lat": 48.5079, "lon": 32.2623, "label": "Кіровоградська область"},
+    "луганська": {"lat": 48.5740, "lon": 39.3078, "label": "Луганська область"},
+    "львівська": {"lat": 49.8397, "lon": 24.0297, "label": "Львівська область"},
+    "миколаївська": {"lat": 46.9750, "lon": 31.9946, "label": "Миколаївська область"},
+    "одеська": {"lat": 46.4825, "lon": 30.7233, "label": "Одеська область"},
+    "полтавська": {"lat": 49.5883, "lon": 34.5514, "label": "Полтавська область"},
+    "рівненська": {"lat": 50.6199, "lon": 26.2516, "label": "Рівненська область"},
+    "сумська": {"lat": 50.9077, "lon": 34.7981, "label": "Сумська область"},
+    "тернопільська": {"lat": 49.5535, "lon": 25.5948, "label": "Тернопільська область"},
+    "харківська": {"lat": 49.9935, "lon": 36.2304, "label": "Харківська область"},
+    "херсонська": {"lat": 46.6354, "lon": 32.6169, "label": "Херсонська область"},
+    "хмельницька": {"lat": 49.4229, "lon": 26.9871, "label": "Хмельницька область"},
+    "черкаська": {"lat": 49.4444, "lon": 32.0598, "label": "Черкаська область"},
+    "чернівецька": {"lat": 48.2915, "lon": 25.9403, "label": "Чернівецька область"},
+    "чернігівська": {"lat": 51.4982, "lon": 31.2893, "label": "Чернігівська область"},
+}
 
 
 @st.cache_resource
@@ -129,6 +167,70 @@ def load_territories():
     return data
 
 
+def normalize_oblast_name(value):
+    if pd.isna(value):
+        return None
+
+    normalized = str(value).strip().lower()
+    normalized = normalized.replace("область", "")
+    normalized = normalized.replace("м.", "")
+    normalized = " ".join(normalized.split())
+    return normalized
+
+
+def build_oblast_map_data(data):
+    if data.empty:
+        return pd.DataFrame(columns=["oblast", "lat", "lon", "records", "map_size"])
+
+    stats = (
+        data.assign(oblast_key=data["oblast"].apply(normalize_oblast_name))
+        .groupby("oblast_key", dropna=True)
+        .size()
+        .reset_index(name="records")
+    )
+
+    rows = []
+    max_records = max(stats["records"].max(), 1)
+
+    for _, row in stats.iterrows():
+        coords = OBLAST_COORDS.get(row["oblast_key"])
+        if not coords:
+            continue
+
+        records = int(row["records"])
+        rows.append(
+            {
+                "oblast": coords["label"],
+                "lat": coords["lat"],
+                "lon": coords["lon"],
+                "records": records,
+                "map_size": 18000 + int((records / max_records) * 62000),
+            }
+        )
+
+    return pd.DataFrame(rows).sort_values("records", ascending=False)
+
+
+def prepare_display_table(data):
+    table = data.copy()
+    table["status_from"] = table["status_from"].dt.strftime("%d.%m.%Y")
+    table["status_to"] = table["status_to"].dt.strftime("%d.%m.%Y").fillna("чинний / не зазначено")
+    table["loaded_at"] = table["loaded_at"].dt.strftime("%d.%m.%Y %H:%M").fillna("")
+    table = table.rename(
+        columns={
+            "hromada_code_7": "Код громади",
+            "territory_name": "Назва території",
+            "oblast": "Область",
+            "rayon": "Район",
+            "category": "Категорія",
+            "status_from": "Початок статусу",
+            "status_to": "Кінець статусу",
+            "loaded_at": "Завантажено в базу",
+        }
+    )
+    return table
+
+
 latest_doc = load_latest_document()
 df = load_territories()
 
@@ -152,8 +254,6 @@ if df.empty:
     st.error("У базі даних немає записів для відображення.")
     st.stop()
 
-min_date = df["status_from"].min()
-max_known_date = df["status_to"].max()
 open_statuses = df["status_to"].isna().sum()
 
 kpi1, kpi2, kpi3, kpi4 = st.columns(4)
@@ -172,7 +272,7 @@ with st.expander("Що показує цей моніторинг"):
     )
 
 st.sidebar.header("Параметри перегляду")
-st.sidebar.caption("Фільтри застосовуються до вкладки зі станом на дату.")
+st.sidebar.caption("Фільтри застосовуються до таблиці, аналітики та карти.")
 
 selected_date = st.sidebar.date_input("Дата", value=pd.Timestamp.today())
 
@@ -211,28 +311,9 @@ if search_text:
         filtered["territory_name"].str.contains(search_text, case=False, na=False)
     ]
 
+map_data = build_oblast_map_data(filtered)
 
-def prepare_display_table(data):
-    table = data.copy()
-    table["status_from"] = table["status_from"].dt.strftime("%d.%m.%Y")
-    table["status_to"] = table["status_to"].dt.strftime("%d.%m.%Y").fillna("чинний / не зазначено")
-    table["loaded_at"] = table["loaded_at"].dt.strftime("%d.%m.%Y %H:%M").fillna("")
-    table = table.rename(
-        columns={
-            "hromada_code_7": "Код громади",
-            "territory_name": "Назва території",
-            "oblast": "Область",
-            "rayon": "Район",
-            "category": "Категорія",
-            "status_from": "Початок статусу",
-            "status_to": "Кінець статусу",
-            "loaded_at": "Завантажено в базу",
-        }
-    )
-    return table
-
-
-tab1, tab2, tab3 = st.tabs(["Станом на дату", "Історія території", "Аналітика"])
+tab1, tab2, tab3, tab4 = st.tabs(["Станом на дату", "Історія території", "Аналітика", "Карта"])
 
 with tab1:
     st.subheader("Станом на дату")
@@ -315,6 +396,43 @@ with tab3:
             f"Найбільша категорія у поточній вибірці: {top_category} — {top_count} записів. "
             "Цей блок можна розширити до автоматичної короткої аналітичної довідки для звіту."
         )
+
+with tab4:
+    st.subheader("Карта за областями")
+    st.markdown(
+        """
+        <div class="map-note">
+            Це оглядова карта за областями. Точка показує центр області, а її розмір залежить від кількості записів у поточній вибірці.
+            Для повноцінної карти громад пізніше потрібно підключити geojson меж громад або районів.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if map_data.empty:
+        st.info("Для обраних фільтрів немає даних, які можна показати на карті.")
+    else:
+        map_left, map_right = st.columns([2, 1])
+
+        with map_left:
+            st.map(
+                map_data,
+                latitude="lat",
+                longitude="lon",
+                size="map_size",
+                zoom=5,
+                use_container_width=True,
+            )
+
+        with map_right:
+            st.write("Кількість записів за областями")
+            st.dataframe(
+                map_data[["oblast", "records"]].rename(
+                    columns={"oblast": "Область", "records": "Кількість записів"}
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
 
 st.markdown(
     """
